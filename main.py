@@ -20,7 +20,7 @@ _session: aiohttp.ClientSession | None = None
 
 
 SCRAPEOPS_KEY = os.getenv("SCRAPEOPS_API_KEY", "").strip()
-SCRAPEOPS_PROXY = "http://residential-proxy.scrapeops.io:8181"  # Proxy Port
+SCRAPEOPS_PROXY = f"http://scrapeops:{SCRAPEOPS_KEY}@residential-proxy.scrapeops.io:8181"
 
 
 async def fetch(url: str) -> str:
@@ -38,9 +38,8 @@ async def fetch(url: str) -> str:
     try:
         if SCRAPEOPS_KEY:
             # Эквивалент http://scrapeops:KEY@residential-proxy.scrapeops.io:8181, ssl=False — без проверки сертификатов
-            async with _session.get(
-                url, proxy=SCRAPEOPS_PROXY,
-                proxy_auth=aiohttp.BasicAuth("scrapeops", SCRAPEOPS_KEY), ssl=False,
+          async with _session.get(
+                url, proxy=SCRAPEOPS_PROXY, ssl=False,
             ) as r:
                 r.raise_for_status()
                 html = await r.text()
