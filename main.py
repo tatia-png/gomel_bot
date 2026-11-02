@@ -46,7 +46,6 @@ def clean(t: str) -> str:
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 
 async def parse_routes(kind: str) -> list[dict]:
-    # Заходим на главную, чтобы собрать номера и названия
     html = await fetch(BASE)
     if not html:
         return []
@@ -60,11 +59,19 @@ async def parse_routes(kind: str) -> list[dict]:
             num = m.group(1)
             text = clean(a.get_text())
             
-            # Пытаемся найти название в тексте ссылки или рядом (например, "8 Вокзал - Мильча")
-            name_match = re.search(r"([А-ЯЁ][^0-9]{3,}\s*[-—]\s*[А-ЯЁ][^0-9]{3,})", text)
-            route_name = name_match.group(1).strip() if name_match else text
+            # Ищем строку вида "Троллейбус №1: Вокзал - пос. Новая Жизнь"
+            # Отрезаем всё, что до двоеточия (или до первого тире)
+            name_match = re.search(r"№?\s*\d+[а-яa-z]?[:\-—]\s*(.+)", text, re.I)
             
-            found[num] = route_name if route_name and len(route_name) > 3 else "Маршрут"
+            if name_match:
+                route_name = name_match.group(1).strip()
+            else:
+                route_name = text
+
+            if not route_name or len(route_name) < 3:
+                route_name = f"Маршрут №{num}"
+                
+            found[num] = route_name
 
     def keyf(n):
         m = re.match(r"(\d+)(.*)", n)
@@ -74,7 +81,6 @@ async def parse_routes(kind: str) -> list[dict]:
             for n in sorted(found.keys(), key=keyf)]
 
 async def parse_stops_and_times(kind: str, number: str):
-    # Возвращаемся к тому коду, который выдавал остановки (даже с мусором)
     url = f"{BASE}{SECTIONS[kind]}{number}"
     html = await fetch(url)
     if not html:
@@ -85,32 +91,35 @@ async def parse_stops_and_times(kind: str, number: str):
 
     stops = []
     times = []
-    
-    in_stops_block = False
+    start_collecting = False
 
     for i, line in enumerate(lines):
-        if (" - " in line or " — " in line) and len(line) < 60 and not any(x in line.lower() for x in ["расписание", "карта", "вопросы"]):
-            in_stops_block = True
+        # Ждем заголовок вида "Автобус №18:" или "Троллейбус №17:"
+        if re.search(r"(Автобус|Троллейбус)\s*№\s*\d+", line, re.I):
+            start_collecting = True
+            continue
+        
+        if not start_collecting:
             continue
             
-        if in_stops_block and TIME_RE.search(line):
+        # Собираем время
+        if TIME_RE.search(line):
             times.extend(TIME_RE.findall(line))
             
-        if in_stops_block and 2 < len(line) < 50 and not TIME_RE.search(line) and not re.search(r"^(меню|главная|автобус|троллейбус|поиск|расписание)", line, re.I):
-            if not re.match(r"^\d+[а-яa-z]?\s", line):
+        # Собираем названия остановок (без времени, без "5ч 1м")
+        if not TIME_RE.search(line) and 2 < len(line) < 50 and not re.match(r"^-\d", line):
+            if not re.search(r"(мин|час|рейс|маршрут|расписание)", line, re.I):
                 stops.append({"id": len(stops), "name": line, "pos": i})
 
-        if any(x in line.lower() for x in ["частые вопросы", "карта маршрута"]):
-            in_stops_block = False
-
+    # Убираем дубли
     seen = set()
     clean_stops = []
     for s in stops:
-        if s["name"] not in seen and len(s["name"]) > 2:
+        if s["name"] not in seen:
             seen.add(s["name"])
             clean_stops.append(s)
 
-    mid = len(clean_stops) // 2 if len(clean_stops) > 10 else len(clean_stops)
+    mid = len(clean_stops) // 2 if len(clean_stops) > 5 else len(clean_stops)
     
     all_stops = [
         {"direction": 0, "stops": clean_stops[:mid]},
@@ -145,6 +154,7 @@ async def api_schedule(type: str, number: str, stop_id: int, direction: int = 0)
         raise HTTPException(404, "Неизвестный тип")
     all_stops, times = await parse_stops_and_times(type, number)
     chosen = all_stops[direction % 2] if len(all_stops) > 1 else all_stops[0]
+    
     demo = not times
     if demo:
         times = ["05:55", "06:20", "07:10"]
