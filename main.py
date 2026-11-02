@@ -20,11 +20,11 @@ _session: aiohttp.ClientSession | None = None
 
 
 SCRAPEOPS_KEY = os.getenv("SCRAPEOPS_API_KEY", "").strip()
-SCRAPEOPS_URL = "https://proxy.scrapeops.io/v1/"
+SCRAPEOPS_PROXY = "http://residential-proxy.scrapeops.io:8181"  # Proxy Port
 
 
 async def fetch(url: str) -> str:
-    """Скачивает страницу. Если задан SCRAPEOPS_API_KEY — запрос идёт через прокси ScrapeOps."""
+    """Скачивает страницу. Если задан SCRAPEOPS_API_KEY — запрос идёт через прокси ScrapeOps (Proxy Port)."""
     global _session
     hit = _cache.get(url)
     if hit and time.time() - hit[0] < CACHE_TTL:
@@ -37,8 +37,11 @@ async def fetch(url: str) -> str:
         )
     try:
         if SCRAPEOPS_KEY:
-            # aiohttp сам url-кодирует params, поэтому целевой адрес передаём как есть
-            async with _session.get(SCRAPEOPS_URL, params={"api_key": SCRAPEOPS_KEY, "url": url}) as r:
+            # Эквивалент http://scrapeops:KEY@residential-proxy.scrapeops.io:8181, ssl=False — без проверки сертификатов
+            async with _session.get(
+                url, proxy=SCRAPEOPS_PROXY,
+                proxy_auth=aiohttp.BasicAuth("scrapeops", SCRAPEOPS_KEY), ssl=False,
+            ) as r:
                 r.raise_for_status()
                 html = await r.text()
         else:
