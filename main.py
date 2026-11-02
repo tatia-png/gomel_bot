@@ -1,5 +1,5 @@
 """Транспорт Гомеля — Telegram Mini App (FastAPI + парсер gomeltrans.net)."""
-import asyncio, re, time
+import asyncio, os, re, time
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -19,7 +19,12 @@ _cache: dict = {}
 _session: aiohttp.ClientSession | None = None
 
 
+SCRAPEOPS_KEY = os.getenv("SCRAPEOPS_API_KEY", "").strip()
+SCRAPEOPS_URL = "https://proxy.scrapeops.io/v1/"
+
+
 async def fetch(url: str) -> str:
+    """Скачивает страницу. Если задан SCRAPEOPS_API_KEY — запрос идёт через прокси ScrapeOps."""
     global _session
     hit = _cache.get(url)
     if hit and time.time() - hit[0] < CACHE_TTL:
@@ -28,13 +33,20 @@ async def fetch(url: str) -> str:
         _session = aiohttp.ClientSession(
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
                      "Accept-Language": "ru-RU,ru;q=0.9", "Accept": "text/html,application/xhtml+xml"},
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=60 if SCRAPEOPS_KEY else 15),
         )
     try:
-        async with _session.get(url) as r:
-            r.raise_for_status()
-            html = await r.text()
-    except Exception:
+        if SCRAPEOPS_KEY:
+            # aiohttp сам url-кодирует params, поэтому целевой адрес передаём как есть
+            async with _session.get(SCRAPEOPS_URL, params={"api_key": SCRAPEOPS_KEY, "url": url}) as r:
+                r.raise_for_status()
+                html = await r.text()
+        else:
+            async with _session.get(url) as r:
+                r.raise_for_status()
+                html = await r.text()
+    except Exception as e:
+        print(f"fetch failed for {url}: {e!r}")  # видно в логах Render
         return ""
     _cache[url] = (time.time(), html)
     return html
