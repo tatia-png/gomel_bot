@@ -30,12 +30,17 @@ async def fetch(url: str) -> str:
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"},
             timeout=aiohttp.ClientTimeout(total=15),
         )
-    try:
-        async with _session.get(url) as r:
-            r.raise_for_status()
-            html = await r.text()
-    except Exception as e:
-        print(f"fetch failed for {url}: {e!r}")
+    html = ""
+    for attempt in range(3):  # сайт иногда отвечает ошибкой при пачке запросов — повторяем
+        try:
+            async with _session.get(url) as r:
+                r.raise_for_status()
+                html = await r.text()
+            break
+        except Exception as e:
+            print(f"fetch failed for {url} (try {attempt + 1}): {e!r}")
+            await asyncio.sleep(0.6 * (attempt + 1))
+    if not html:
         return ""
     _cache[url] = (time.time(), html)
     return html
@@ -132,25 +137,34 @@ async def parse_routes(kind: str) -> list[dict]:
     return [{"type": kind, "number": n, "name": found[n]} for n in sorted(found, key=keyf)]
 
 
-async def parse_stop_times(url: str, day_type: str | None = None) -> list[str]:
-    """Страница остановки: таблица «Час | Буд./Вых. | минуты» -> ['06:36', ...] для нужного типа дня."""
-    day_type = day_type if day_type in ("week", "weekend") else day_type_now()
+async def parse_stop_times(url: str) -> dict | None:
+    """Страница остановки: таблица «Час | Буд./Вых. | минуты».
+    Возвращает {"week": ["06:36", ...], "weekend": [...]} или None, если страницу не удалось загрузить/разобрать.
+    Пустой список для дня — это нормально (например, конечная или нет рейсов в выходные)."""
     html = await fetch(url)
     if not html:
-        return []
-    out, hour = set(), None
+        return None
+    res = {"week": set(), "weekend": set()}
+    hour, rows = None, 0
     for tr in soup_of(html).find_all("tr"):
         cells = [clean(c.get_text(" ")) for c in tr.find_all(["td", "th"])]
-        if len(cells) >= 3 and cells[0].isdigit():       # «6 | Буд. | 36 52»
-            hour, label, mins = int(cells[0]), cells[1], cells[2]
-        elif len(cells) >= 2 and cells[0][:3].lower() in ("буд", "вых") and hour is not None:  # rowspan: «Вых. | 00»
-            label, mins = cells[0], cells[1]
-        else:
+        li = next((i for i, c in enumerate(cells) if c[:3].lower() in ("буд", "вых")), None)
+        if li is None:
             continue
-        is_week = label[:3].lower() == "буд"
-        if is_week == (day_type == "week"):
-            out.update(f"{hour:02d}:{m}" for m in re.findall(r"\b\d{2}\b", mins) if int(m) < 60)
-    return sorted(out)
+        # час — число в ячейке до метки; если ячейка пустая/объединена (rowspan) — берём час предыдущей строки
+        for c in cells[:li]:
+            if c.isdigit():
+                hour = int(c)
+        if hour is None:
+            continue
+        rows += 1
+        key = "week" if cells[li][:3].lower() == "буд" else "weekend"
+        for m in re.findall(r"\b\d{2}\b", " ".join(cells[li + 1:])):
+            if int(m) < 60:
+                res[key].add(f"{hour % 24:02d}:{m}")
+    if not rows:
+        return None
+    return {k: sorted(v) for k, v in res.items()}
 
 
 async def parse_stops_and_times(kind: str, number: str, day_type: str | None = None, direction: int = 0) -> list[dict]:
@@ -169,7 +183,7 @@ async def parse_stops_and_times(kind: str, number: str, day_type: str | None = N
 
 async def warm_names():
     """Фоном подтягиваем названия маршрутов (на главной их нет, только номера)."""
-    sem = asyncio.Semaphore(4)
+    sem = asyncio.Semaphore(3)
 
     async def one(kind, num):
         async with sem:
@@ -212,16 +226,21 @@ async def api_stops(type: str, number: str, direction: int = 0):
 
 @app.get("/api/schedule/{type}/{number}/{stop_id}")
 async def api_schedule(type: str, number: str, stop_id: int, direction: int = 0, day: str | None = None):
+    """day=week|weekend (по умолчанию — сегодняшний день по Минску)."""
     if type not in SECTIONS:
         raise HTTPException(404, "Неизвестный тип")
-    day = day if day in ("week", "weekend") else day_type_now()
+    today = day_type_now()
+    day = day if day in ("week", "weekend") else today
     stops = await parse_stops_and_times(type, number, day, direction)
     stop = next((s for s in stops if s["id"] == stop_id), None)
-    times = await parse_stop_times(stop["url"], day) if stop else []
-    demo = not times
-    if demo:
-        times = ["05:55", "06:20", "07:10"]
-    return {"demo": demo, "day": day, "stop": stop["name"] if stop else "", "times": times}
+    if not stop:
+        raise HTTPException(404, "Остановка не найдена")
+    data = await parse_stop_times(stop["url"])
+    if data is None:
+        raise HTTPException(502, "Не удалось загрузить страницу остановки")
+    # заглушек нет: если в этот день рейсов нет, вернём пустой список
+    return {"demo": False, "day": day, "today": today, "stop": stop["name"],
+            "times": data[day], "counts": {k: len(v) for k, v in data.items()}}
 
 
 @app.get("/api/search")
