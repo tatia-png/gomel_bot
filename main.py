@@ -1,9 +1,10 @@
 """Транспорт Гомеля — Telegram Mini App (FastAPI + парсер gomeltrans.net)."""
 import asyncio, os, re, time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import aiohttp
+import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -19,36 +20,39 @@ _cache: dict = {}
 _session: aiohttp.ClientSession | None = None
 
 
-SCRAPEOPS_KEY = os.getenv("SCRAPEOPS_API_KEY", "").strip()
-SCRAPEOPS_PROXY = f"http://scrapeops:{SCRAPEOPS_KEY}@residential-proxy.scrapeops.io:8181"
+SCRAPEOPS_KEY = os.getenv("SCRAPEOPS_API_KEY", "").strip()  # ключ хранится только в переменной окружения
+
+
+def _fetch_via_scrapeops(url: str) -> str:
+    """Синхронный запрос через ScrapeOps API Endpoint (requests)."""
+    api_url = f"https://proxy.scrapeops.io/v1/?api_key={SCRAPEOPS_KEY}&url={quote(url, safe='')}"
+    r = requests.get(api_url, timeout=60)
+    r.raise_for_status()
+    r.encoding = r.encoding or "utf-8"
+    return r.text
 
 
 async def fetch(url: str) -> str:
-    """Скачивает страницу. Если задан SCRAPEOPS_API_KEY — запрос идёт через прокси ScrapeOps (Proxy Port)."""
+    """Скачивает страницу. Есть SCRAPEOPS_API_KEY — через ScrapeOps API, иначе напрямую (aiohttp)."""
     global _session
     hit = _cache.get(url)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return hit[1]
-    if _session is None or _session.closed:
-        _session = aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                     "Accept-Language": "ru-RU,ru;q=0.9", "Accept": "text/html,application/xhtml+xml"},
-            timeout=aiohttp.ClientTimeout(total=60 if SCRAPEOPS_KEY else 15),
-        )
     try:
         if SCRAPEOPS_KEY:
-            # Эквивалент http://scrapeops:KEY@residential-proxy.scrapeops.io:8181, ssl=False — без проверки сертификатов
-          async with _session.get(
-                url, proxy=SCRAPEOPS_PROXY, ssl=False,
-            ) as r:
-                r.raise_for_status()
-                html = await r.text()
+            html = await asyncio.to_thread(_fetch_via_scrapeops, url)  # requests блокирующий — уводим в поток
         else:
+            if _session is None or _session.closed:
+                _session = aiohttp.ClientSession(
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                             "Accept-Language": "ru-RU,ru;q=0.9", "Accept": "text/html,application/xhtml+xml"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                )
             async with _session.get(url) as r:
                 r.raise_for_status()
                 html = await r.text()
     except Exception as e:
-        print(f"fetch failed for {url}: {e!r}")  # видно в логах Render
+        print(f"fetch failed for {url}: {type(e).__name__}: {str(e).replace(SCRAPEOPS_KEY, '***') if SCRAPEOPS_KEY else e}")
         return ""
     _cache[url] = (time.time(), html)
     return html
