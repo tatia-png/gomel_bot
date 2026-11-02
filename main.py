@@ -46,7 +46,7 @@ def clean(t: str) -> str:
 TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 
 async def parse_routes(kind: str) -> list[dict]:
-    # 1. Заходим на главную, чтобы собрать номера маршрутов
+    # 1. Заходим на главную, чтобы собрать номера маршрутов и их названия
     html = await fetch(BASE)
     if not html:
         return []
@@ -59,8 +59,12 @@ async def parse_routes(kind: str) -> list[dict]:
         m = pattern.search(a["href"])
         if m:
             num = m.group(1)
+            # Ищем название маршрута в тексте ссылки или рядом
             text = clean(a.get_text())
-            found[num] = text
+            parent_text = clean(a.parent.get_text()) if a.parent else ""
+            # Если в тексте ссылки только номер, пробуем взять из родителя
+            route_name = text if len(text) > 3 else parent_text
+            found[num] = route_name
 
     def keyf(n):
         m = re.match(r"(\d+)(.*)", n)
@@ -75,39 +79,48 @@ async def parse_stops_and_times(kind: str, number: str):
     if not html:
         return [], []
     soup = soup_of(html)
-    text = soup.get_text("\n")
-    lines = [clean(l) for l in text.splitlines() if clean(l)]
-
+    
     stops = []
     times = []
+
+    # На сайте BTrans остановки с временем находятся в блоке с классом, содержащим "timeline" или "route"
+    # Мы ищем все элементы, которые похожи на остановки в таймлайне
+    # Обычно это ссылки или div'ы, внутри которых есть название и время
     
-    # Список слов-мусора, которые точно не являются остановками
-    NOISE_WORDS = r"^(меню|главная|автобус|троллейбус|поиск|расписание|карта|откуда|куда|где|когда|сколько|стоимость|проезд|штраф|перевозчик|часто|вопросы|другие|подробнее|наверх|версия|сайт|контакты|о нас|как добраться|маршрут)"
-    
-    in_stops_block = False
+    # Способ 1: Ищем все ссылки на остановки (в них есть название)
+    for a in soup.find_all("a", href=True):
+        if "/stop/" in a["href"] or "ostanovka" in a["href"].lower():
+            name = clean(a.get_text())
+            if name and len(name) > 2:
+                # Ищем время рядом с этой ссылкой
+                time_match = TIME_RE.search(a.parent.get_text() if a.parent else "")
+                if time_match:
+                    times.append(time_match.group(0))
+                stops.append({"id": len(stops), "name": name})
 
-    for i, line in enumerate(lines):
-        if (" - " in line or " — " in line) and len(line) < 60 and not any(x in line.lower() for x in ["расписание", "карта", "вопросы"]):
-            in_stops_block = True
-            continue
-            
-        if in_stops_block and TIME_RE.search(line):
-            times.extend(TIME_RE.findall(line))
-            
-        if in_stops_block and 2 < len(line) < 50 and not TIME_RE.search(line) and not re.search(NOISE_WORDS, line, re.I):
-            if not re.match(r"^\d+[а-яa-z]?\s", line):
-                stops.append({"id": len(stops), "name": line, "pos": i})
+    # Способ 2: Если ссылок нет, ищем просто текст, где чередуются время и название
+    if not stops:
+        lines = [clean(l) for l in soup.get_text("\n").splitlines() if clean(l)]
+        for i, line in enumerate(lines):
+            # Ищем строку с названием остановки (обычно это просто текст без цифр и времени)
+            if 3 < len(line) < 50 and not TIME_RE.search(line) and not re.search(r"(мин|час|расписание|маршрут|троллейбус|автобус)", line, re.I):
+                # Проверяем, есть ли время на следующей строке или через одну
+                if i + 1 < len(lines) and TIME_RE.search(lines[i+1]):
+                    stops.append({"id": len(stops), "name": line})
+                    times.append(TIME_RE.search(lines[i+1]).group(0))
+                elif i + 2 < len(lines) and TIME_RE.search(lines[i+2]):
+                    stops.append({"id": len(stops), "name": line})
+                    times.append(TIME_RE.search(lines[i+2]).group(0))
 
-        if any(x in line.lower() for x in ["частые вопросы", "карта маршрута"]):
-            in_stops_block = False
-
+    # Убираем дубли
     seen = set()
     clean_stops = []
     for s in stops:
-        if s["name"] not in seen and len(s["name"]) > 2:
+        if s["name"] not in seen:
             seen.add(s["name"])
             clean_stops.append(s)
 
+    # Делим на два направления (для простоты пополам)
     mid = len(clean_stops) // 2 if len(clean_stops) > 10 else len(clean_stops)
     
     all_stops = [
