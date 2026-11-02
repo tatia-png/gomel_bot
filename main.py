@@ -62,7 +62,6 @@ async def parse_routes(kind: str) -> list[dict]:
             text = clean(a.get_text())
             found[num] = text
 
-    # Если на главной не нашли, идем на страницу со списком (если есть)
     def keyf(n):
         m = re.match(r"(\d+)(.*)", n)
         return (int(m.group(1)), m.group(2)) if m else (9999, n)
@@ -79,43 +78,44 @@ async def parse_stops_and_times(kind: str, number: str):
     text = soup.get_text("\n")
     lines = [clean(l) for l in text.splitlines() if clean(l)]
 
-    # Ищем заголовки направлений (например, "Вокзал - Мильча" и "Мильча - Вокзал")
-    # BTrans обычно пишет их крупным текстом или в виде заголовков h2/h3
-    headers = soup.find_all(["h2", "h3"])
-    dir_names = []
-    for h in headers:
-        h_text = clean(h.get_text())
-        if " - " in h_text or " — " in h_text:
-            dir_names.append(h_text)
-    
-    # Если заголовков нет, берем направления из описания
-    if not dir_names:
-        dir_names = ["Прямое направление", "Обратное направление"]
-
     stops = []
     times = []
     
-    # Пытаемся найти блоки с остановками и временем. 
-    # В тексте BTrans остановки часто идут списком.
-    for i, line in enumerate(lines):
-        if 3 < len(line) < 50 and not TIME_RE.search(line) and not re.search(r"(расписание|маршрут|остановк|время|режим|карта)", line, re.I):
-            stops.append({"id": len(stops), "name": line, "pos": i})
-            
-        # Собираем время
-        if TIME_RE.search(line) and len(times) < 100: # Ограничитель
-             times.extend(TIME_RE.findall(line))
-
-    # Разделяем на два направления (пополам, если не нашли маркеров)
-    mid = len(stops) // 2 if len(stops) > 10 else len(stops)
+    # Список слов-мусора, которые точно не являются остановками
+    NOISE_WORDS = r"^(меню|главная|автобус|троллейбус|поиск|расписание|карта|откуда|куда|где|когда|сколько|стоимость|проезд|штраф|перевозчик|часто|вопросы|другие|подробнее|наверх|версия|сайт|контакты|о нас|как добраться|маршрут)"
     
-    # Возвращаем остановки для обоих направлений и все найденное время
-    all_stops = [
-        {"direction": 0, "stops": stops[:mid], "times": times},
-        {"direction": 1, "stops": stops[mid:], "times": times}
-    ]
-    return all_stops, times
+    in_stops_block = False
 
-# ---------- API ----------
+    for i, line in enumerate(lines):
+        if (" - " in line or " — " in line) and len(line) < 60 and not any(x in line.lower() for x in ["расписание", "карта", "вопросы"]):
+            in_stops_block = True
+            continue
+            
+        if in_stops_block and TIME_RE.search(line):
+            times.extend(TIME_RE.findall(line))
+            
+        if in_stops_block and 2 < len(line) < 50 and not TIME_RE.search(line) and not re.search(NOISE_WORDS, line, re.I):
+            if not re.match(r"^\d+[а-яa-z]?\s", line):
+                stops.append({"id": len(stops), "name": line, "pos": i})
+
+        if any(x in line.lower() for x in ["частые вопросы", "карта маршрута"]):
+            in_stops_block = False
+
+    seen = set()
+    clean_stops = []
+    for s in stops:
+        if s["name"] not in seen and len(s["name"]) > 2:
+            seen.add(s["name"])
+            clean_stops.append(s)
+
+    mid = len(clean_stops) // 2 if len(clean_stops) > 10 else len(clean_stops)
+    
+    all_stops = [
+        {"direction": 0, "stops": clean_stops[:mid]},
+        {"direction": 1, "stops": clean_stops[mid:]}
+    ]
+    return all_stops, list(set(times))
+
 @app.get("/api/routes")
 async def api_routes(type: str | None = None):
     kinds = [type] if type in SECTIONS else list(SECTIONS)
@@ -131,31 +131,23 @@ async def api_stops(type: str, number: str, direction: int = 0):
     if type not in SECTIONS:
         raise HTTPException(404, "Неизвестный тип")
     all_stops, _ = await parse_stops_and_times(type, number)
-    
-    # Выбираем направление
     chosen = all_stops[direction % 2] if len(all_stops) > 1 else all_stops[0]
-    
     demo = not chosen["stops"]
     if demo:
         chosen["stops"] = [{"id": 0, "name": "Демо-остановка"}]
-        
     return {"demo": demo, "direction": direction % 2, "stops": chosen["stops"]}
 
 @app.get("/api/schedule/{type}/{number}/{stop_id}")
 async def api_schedule(type: str, number: str, stop_id: int, direction: int = 0):
     if type not in SECTIONS:
         raise HTTPException(404, "Неизвестный тип")
-    
     all_stops, times = await parse_stops_and_times(type, number)
     chosen = all_stops[direction % 2] if len(all_stops) > 1 else all_stops[0]
-    
     demo = not times
     if demo:
         times = ["05:55", "06:20", "07:10"]
-        
     return {"demo": demo, "stop": "Выбранная остановка", "times": sorted(times)}
 
-# ---------- Фронтенд ----------
 STATIC = Path(__file__).parent / "static"
 
 @app.get("/")
