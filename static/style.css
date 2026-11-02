@@ -70,3 +70,9 @@ input:focus { border-color: var(--color-lilac); }
 .notice { background: var(--color-pink); color: #6b2b3a; border-radius: 12px; padding: 10px 12px; font-size: 13px; margin-bottom: 12px; }
 .loader { text-align: center; padding: 30px; color: var(--color-muted); }
 h2 { font-size: 18px; margin: 4px 0 12px; }
+
+.tabs { display: flex; gap: 8px; background: var(--color-card); padding: 6px; border-radius: var(--radius); box-shadow: var(--shadow); }
+.tab { flex: 1; border: 0; border-radius: 12px; padding: 12px; font-size: 16px; font-weight: 600; cursor: pointer;
+  background: transparent; color: var(--color-muted); transition: background .15s; }
+.tab small { opacity: .7; font-weight: 500; }
+.tab.active { background: var(--gradient); color: #fff; text-shadow: 0 1px 2px rgba(60, 60, 100, .25); }
