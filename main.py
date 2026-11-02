@@ -1,7 +1,6 @@
 """Транспорт Гомеля — Telegram Mini App (FastAPI + парсер gomeltrans.net)."""
 import asyncio, os, re, time
 from pathlib import Path
-from urllib.parse import urljoin
 
 from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
@@ -23,9 +22,23 @@ async def fetch(url: str) -> str:
         return hit[1]
     
     try:
-        # Запускаем синхронный requests в отдельном потоке, чтобы не блокировать FastAPI
         def _get():
-            return curl_requests.get(url, impersonate="chrome", timeout=15)
+            # Добавляем полные заголовки, чтобы сайт точно не заблокировал
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            # impersonate="chrome131" подделывает отпечаток нового браузера
+            return curl_requests.get(url, impersonate="chrome131", headers=headers, timeout=15)
             
         response = await asyncio.to_thread(_get)
         response.raise_for_status()
@@ -150,40 +163,83 @@ async def parse_stops(kind: str, number: str, direction: int = 0) -> list[dict]:
     return [{"id": i, "name": s["name"], "pos": s["pos"], "src": "section" if src is section else "full"}
             for i, s in enumerate(chosen)]
 
-# Эндпоинты API (как было раньше)
+# ---------- Демо-данные ----------
+DEMO_ROUTES = [
+    {"type": "bus", "number": "1", "name": "Демо-маршрут", "url": ""},
+    {"type": "bus", "number": "17", "name": "Медгородок — Клёнковский", "url": ""},
+    {"type": "trolleybus", "number": "2", "name": "Демо-маршрут", "url": ""},
+]
+DEMO_STOPS = [["Вокзал", "Площадь Ленина", "Универмаг «Гомель»", "Клёнковский"],
+              ["Клёнковский", "Универмаг «Гомель»", "Площадь Ленина", "Вокзал"]]
+
+def demo_times() -> list[str]:
+    return [f"{h:02d}:{m:02d}" for h in range(5, 24) for m in (5, 25, 45)]
+
+# ---------- API ----------
 @app.get("/api/routes")
-async def api_routes(type: str = Query(..., regex="^(bus|trolleybus)$")):
-    routes = await parse_routes(type)
-    if not routes:
-        # Если не удалось спарсить, отдаем демо-данные, чтобы приложение не падало
-        return {"demo": True, "routes": [
-            {"type": type, "number": "1", "name": "Вокзал — Любенский", "url": ""},
-            {"type": type, "number": "2", "name": "Южный — Химзавод", "url": ""}
-        ]}
-    return {"demo": False, "routes": routes}
+async def api_routes(type: str | None = None):
+    kinds = [type] if type in SECTIONS else list(SECTIONS)
+    res = await asyncio.gather(*(parse_routes(k) for k in kinds))
+    routes = [r for lst in res for r in lst]
+    demo = not routes
+    if demo:
+        routes = [r for r in DEMO_ROUTES if r["type"] in kinds]
+    for r in routes:
+        r.pop("url", None)
+    return {"demo": demo, "routes": routes}
 
-@app.get("/api/stops/{kind}/{number}")
-async def api_stops(kind: str, number: str, direction: int = 0):
-    stops = await parse_stops(kind, number, direction)
-    if not stops:
-        return {"demo": True, "stops": [{"id": 0, "name": "Демо-остановка 1"}, {"id": 1, "name": "Демо-остановка 2"}]}
-    return {"demo": False, "stops": stops}
+@app.get("/api/stops/{type}/{number}")
+async def api_stops(type: str, number: str, direction: int = 0):
+    if type not in SECTIONS:
+        raise HTTPException(404, "Неизвестный тип")
+    stops = await parse_stops(type, number, direction)
+    demo = not stops
+    if demo:
+        names = DEMO_STOPS[direction % 2]
+        stops = [{"id": i, "name": n, "url": ""} for i, n in enumerate(names)]
+    stops = [{"id": s["id"], "name": s["name"]} for s in stops]
+    return {"demo": demo, "direction": direction % 2, "stops": stops}
 
-@app.get("/api/schedule/{kind}/{number}/{stop_id}")
-async def api_schedule(kind: str, number: str, stop_id: int):
-    section, full = await route_lines(kind, number)
-    stops = find_stop_lines(section) or find_stop_lines(full)
-    if not stops or stop_id >= len(stops):
-        return {"demo": True, "times": ["08:00", "09:30", "12:00"]}
-    
-    chosen = split_directions(stops)[0] # Берем первое направление для простоты
-    if stop_id < len(chosen):
-        pos = chosen[stop_id]["pos"]
-        times = parse_times(section if find_stop_lines(section) else full, pos=pos)
-        if times:
-            return {"demo": False, "times": times}
-    return {"demo": True, "times": ["08:00", "09:30", "12:00"]}
+@app.get("/api/schedule/{type}/{number}/{stop_id}")
+async def api_schedule(type: str, number: str, stop_id: int, direction: int = 0, day: str | None = None):
+    if type not in SECTIONS:
+        raise HTTPException(404, "Неизвестный тип")
+    stops = await parse_stops(type, number, direction)
+    stop = next((s for s in stops if s["id"] == stop_id), None)
+    times = []
+    if stop:
+        section, full = await route_lines(type, number)
+        times = parse_times(section if stop["src"] == "section" else full, stop["pos"], full)
+    demo = not times
+    if demo:
+        times = demo_times()
+    return {"demo": demo, "stop": stop["name"] if stop else "", "times": times}
 
-# Статика для мини-приложения
+@app.get("/api/search")
+async def api_search(from_: str = Query(..., alias="from"), to: str = Query(...)):
+    a, b = from_.lower().strip(), to.lower().strip()
+    routes = [r for k in SECTIONS for r in await parse_routes(k)]
+    sem = asyncio.Semaphore(6)
+
+    async def check(r):
+        async with sem:
+            for d in (0, 1):
+                names = [s["name"].lower() for s in await parse_stops(r["type"], r["number"], d)]
+                ia = next((i for i, n in enumerate(names) if a in n), None)
+                ib = next((i for i, n in enumerate(names) if b in n), None)
+                if ia is not None and ib is not None and ia < ib:
+                    return {"type": r["type"], "number": r["number"], "name": r["name"],
+                            "direction": d, "stops_count": ib - ia}
+        return None
+
+    found = [x for x in await asyncio.gather(*(check(r) for r in routes)) if x]
+    return {"results": sorted(found, key=lambda x: x["stops_count"])}
+
+# ---------- Фронтенд ----------
 STATIC = Path(__file__).parent / "static"
-app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+
+@app.get("/")
+async def index():
+    return FileResponse(STATIC / "index.html")
+
+app.mount("/", StaticFiles(directory=STATIC), name="static")
