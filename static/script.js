@@ -66,18 +66,25 @@ function minskNowMinutes() {
   return +p.find(x => x.type === "hour").value % 24 * 60 + +p.find(x => x.type === "minute").value;
 }
 
-async function scheduleView(type, number, stopId, direction) {
+async function scheduleView(type, number, stopId, direction, day = null) {
   head("🕐 Расписание", ""); loading();
   try {
-    const d = await api(`/api/schedule/${type}/${encodeURIComponent(number)}/${stopId}?direction=${direction}`);
+    const q = day ? `&day=${day}` : "";
+    const d = await api(`/api/schedule/${type}/${encodeURIComponent(number)}/${stopId}?direction=${direction}${q}`);
     head("🕐 " + (d.stop || "Расписание"), `№ ${number}`);
     const now = minskNowMinutes();
+    const isToday = d.day === d.today;               // прошедшие рейсы красим только для сегодняшнего дня
     const mins = t => +t.slice(0, 2) * 60 + +t.slice(3);
-    const nextIdx = d.times.findIndex(t => mins(t) >= now);
-    $app.innerHTML = demoNote(d.demo) + (d.times.length
-      ? `<div class="grid">${d.times.map((t, i) =>
-          `<div class="time ${mins(t) < now ? "past" : "future"} ${i === nextIdx ? "next" : ""}">${t}</div>`).join("")}</div>`
-      : '<div class="notice">Расписание не найдено</div>');
+    const nextIdx = isToday ? d.times.findIndex(t => mins(t) >= now) : -1;
+    const tab = (k, label) => `<button class="tab ${d.day === k ? "active" : ""}" data-day="${k}">${label} <small>${d.counts?.[k] ?? ""}</small></button>`;
+    $app.innerHTML = `<div class="tabs">${tab("week", "Будни")}${tab("weekend", "Выходные")}</div>` +
+      (d.times.length
+        ? `<div class="grid">${d.times.map((t, i) =>
+            `<div class="time ${isToday && mins(t) < now ? "past" : "future"} ${i === nextIdx ? "next" : ""}">${t}</div>`).join("")}</div>`
+        : '<div class="notice">В этот день рейсов с этой остановки нет (возможно, это конечная).</div>');
+    $app.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+      if (b.dataset.day !== d.day) scheduleView(type, number, stopId, direction, b.dataset.day);
+    });
   } catch { $app.innerHTML = '<div class="notice">Не удалось загрузить расписание</div>'; }
 }
 
