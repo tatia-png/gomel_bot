@@ -1,7 +1,6 @@
 """Транспорт Гомеля — Telegram Mini App (FastAPI + парсер gomel.btrans.by)."""
 import asyncio, os, re, time
 from pathlib import Path
-from urllib.parse import urljoin
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -52,21 +51,25 @@ async def parse_routes(kind: str) -> list[dict]:
     soup = soup_of(html)
     found = {}
     
+    # Ищем все ссылки на маршруты
     pattern = re.compile(rf"{SECTIONS[kind]}(\d+[а-яa-z]?)")
     for a in soup.find_all("a", href=True):
         m = pattern.search(a["href"])
         if m:
             num = m.group(1)
+            # Берем текст ссылки и очищаем от лишнего
             text = clean(a.get_text())
             
-            # Ищем строку вида "Троллейбус №1: Вокзал - пос. Новая Жизнь"
-            # Отрезаем всё, что до двоеточия (или до первого тире)
-            name_match = re.search(r"№?\s*\d+[а-яa-z]?[:\-—]\s*(.+)", text, re.I)
+            # Ищем "Автобус 2: Начало - Конец" или просто "Начало - Конец"
+            route_name = text
+            if ":" in text:
+                route_name = text.split(":", 1)[1].strip()
             
-            if name_match:
-                route_name = name_match.group(1).strip()
-            else:
-                route_name = text
+            # Если название не найдено в ссылке, пробуем найти в родительском блоке
+            if len(route_name) < 4:
+                parent_text = clean(a.parent.get_text()) if a.parent else ""
+                if ":" in parent_text:
+                    route_name = parent_text.split(":", 1)[1].strip()
 
             if not route_name or len(route_name) < 3:
                 route_name = f"Маршрут №{num}"
@@ -86,30 +89,57 @@ async def parse_stops_and_times(kind: str, number: str):
     if not html:
         return [], []
     soup = soup_of(html)
-    text = soup.get_text("\n")
-    lines = [clean(l) for l in text.splitlines() if clean(l)]
-
+    
     stops = []
-    times = []
-    start_collecting = False
+    
+    # САМЫЙ ТОЧНЫЙ СПОСОБ: Ищем ссылки на остановки.
+    # В BTrans они обычно ведут на /stop/... и внутри содержат название.
+    for a in soup.find_all("a", href=True):
+        if "/stop/" in a["href"] or "ostanovka" in a["href"].lower():
+            stop_name = clean(a.get_text())
+            if not stop_name or len(stop_name) < 2:
+                continue
+                
+            # Ищем время. Оно может быть в этом же блоке (родителе) или рядом.
+            # Обычно время лежит в теге <span> или просто текстом.
+            parent = a.parent
+            if parent:
+                parent_text = parent.get_text(" ", strip=True)
+                time_match = TIME_RE.search(parent_text)
+                if time_match:
+                    stop_time = time_match.group(0)
+                else:
+                    # Если время не в родителе, ищем в следующем соседе
+                    next_sibling = parent.find_next_sibling()
+                    if next_sibling:
+                        next_text = next_sibling.get_text(" ", strip=True)
+                        time_match = TIME_RE.search(next_text)
+                        stop_time = time_match.group(0) if time_match else ""
+                    else:
+                        stop_time = ""
+            else:
+                stop_time = ""
+                
+            # Добавляем остановку
+            stops.append({"id": len(stops), "name": stop_name, "time": stop_time})
 
-    for i, line in enumerate(lines):
-        # Ждем заголовок вида "Автобус №18:" или "Троллейбус №17:"
-        if re.search(r"(Автобус|Троллейбус)\s*№\s*\d+", line, re.I):
-            start_collecting = True
-            continue
-        
-        if not start_collecting:
-            continue
-            
-        # Собираем время
-        if TIME_RE.search(line):
-            times.extend(TIME_RE.findall(line))
-            
-        # Собираем названия остановок (без времени, без "5ч 1м")
-        if not TIME_RE.search(line) and 2 < len(line) < 50 and not re.match(r"^-\d", line):
-            if not re.search(r"(мин|час|рейс|маршрут|расписание)", line, re.I):
-                stops.append({"id": len(stops), "name": line, "pos": i})
+    # Если ссылок не нашли, пробуем старый метод (по тексту)
+    if not stops:
+        text = soup.get_text("\n")
+        lines = [clean(l) for l in text.splitlines() if clean(l)]
+        start_collecting = False
+        for line in lines:
+            if re.search(r"(Автобус|Троллейбус)\s*№\s*\d+", line, re.I):
+                start_collecting = True
+                continue
+            if not start_collecting:
+                continue
+                
+            if TIME_RE.search(line):
+                continue
+                
+            if 2 < len(line) < 50 and not re.search(r"(мин|час|рейс|маршрут|расписание)", line, re.I):
+                stops.append({"id": len(stops), "name": line, "time": ""})
 
     # Убираем дубли
     seen = set()
@@ -119,13 +149,14 @@ async def parse_stops_and_times(kind: str, number: str):
             seen.add(s["name"])
             clean_stops.append(s)
 
+    # Делим на два направления
     mid = len(clean_stops) // 2 if len(clean_stops) > 5 else len(clean_stops)
-    
     all_stops = [
         {"direction": 0, "stops": clean_stops[:mid]},
         {"direction": 1, "stops": clean_stops[mid:]}
     ]
-    return all_stops, list(set(times))
+    
+    return all_stops, []
 
 @app.get("/api/routes")
 async def api_routes(type: str | None = None):
@@ -152,13 +183,21 @@ async def api_stops(type: str, number: str, direction: int = 0):
 async def api_schedule(type: str, number: str, stop_id: int, direction: int = 0):
     if type not in SECTIONS:
         raise HTTPException(404, "Неизвестный тип")
-    all_stops, times = await parse_stops_and_times(type, number)
+    all_stops, _ = await parse_stops_and_times(type, number)
     chosen = all_stops[direction % 2] if len(all_stops) > 1 else all_stops[0]
     
-    demo = not times
-    if demo:
+    # Ищем выбранную остановку и берем ЕЕ время
+    stop = next((s for s in chosen["stops"] if s["id"] == stop_id), None)
+    
+    times = []
+    if stop and stop.get("time"):
+        times = [stop["time"]]
+    else:
+        # Если точное время не нашли, отдаем заглушку (чтобы не ломалось)
         times = ["05:55", "06:20", "07:10"]
-    return {"demo": demo, "stop": "Выбранная остановка", "times": sorted(times)}
+        
+    demo = not (stop and stop.get("time"))
+    return {"demo": demo, "stop": stop["name"] if stop else "Остановка", "times": times}
 
 STATIC = Path(__file__).parent / "static"
 
