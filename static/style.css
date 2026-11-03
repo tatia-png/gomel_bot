@@ -76,3 +76,8 @@ h2 { font-size: 18px; margin: 4px 0 12px; }
   background: transparent; color: var(--color-muted); transition: background .15s; }
 .tab small { opacity: .7; font-weight: 500; }
 .tab.active { background: var(--gradient); color: #fff; text-shadow: 0 1px 2px rgba(60, 60, 100, .25); }
+.btn.rose { background: linear-gradient(135deg, var(--color-blue), var(--color-pink)); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip { border: 0; border-radius: 999px; padding: 8px 14px; font-size: 14px; font-weight: 600; cursor: pointer;
+  background: var(--color-card); color: var(--color-muted); box-shadow: var(--shadow); }
+.chip.active { background: var(--gradient); color: #fff; text-shadow: 0 1px 2px rgba(60, 60, 100, .25); }
