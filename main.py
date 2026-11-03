@@ -372,6 +372,15 @@ async def api_search(from_: str = Query(..., alias="from"), to: str = Query(...)
     return {"results": sorted(found, key=lambda x: x["stops_count"])}
 
 
+@app.middleware("http")
+async def no_cache(request, call_next):
+    """Telegram агрессивно кэширует статику — просим всегда перепроверять файлы фронтенда."""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 STATIC = Path(__file__).parent / "static"
 
 
