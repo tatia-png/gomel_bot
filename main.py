@@ -62,6 +62,7 @@ async def parse_routes(kind: str) -> list[dict]:
         if m:
             num = m.group(1)
             text = clean(a.get_text())
+            # Отрезаем всё до двоеточия, чтобы получить "Начало - Конец"
             route_name = text.split(":", 1)[1].strip() if ":" in text else text
             if len(route_name) < 3:
                 route_name = f"Маршрут №{num}"
@@ -82,13 +83,18 @@ async def parse_stops(kind: str, number: str):
     soup = soup_of(html)
     
     stops = []
+    # Возвращаем рабочую логику: ищем ссылки, которые ведут на остановки
+    # На BTrans ссылки на остановки содержат название маршрута в пути
     for a in soup.find_all("a", href=True):
-        if "/stop/" in a["href"]:
+        href = a["href"]
+        # Проверяем, что ссылка ведет на этот же маршрут (например /trollejbus/2/...)
+        if f"/{kind}/{number}/" in href or "/stop/" in href:
             name = clean(a.get_text())
             if name and 2 < len(name) < 50:
-                stop_url = f"{BASE}{a['href']}" if a['href'].startswith('/') else a['href']
+                stop_url = f"{BASE}{href}" if href.startswith('/') else href
                 stops.append({"id": len(stops), "name": name, "url": stop_url})
 
+    # Убираем дубли
     seen = set()
     clean_stops = []
     for s in stops:
@@ -96,6 +102,7 @@ async def parse_stops(kind: str, number: str):
             seen.add(s["name"])
             clean_stops.append(s)
             
+    # Делим на два направления
     mid = len(clean_stops) // 2 if len(clean_stops) > 5 else len(clean_stops)
     return [clean_stops[:mid], clean_stops[mid:]]
 
